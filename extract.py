@@ -1,43 +1,34 @@
-from PyPDF2 import PdfReader
-import re, os
+import fitz  # PyMuPDF
 
-def extract_mcqs_from_pdf(pdf_path):
-    reader = PdfReader(pdf_path)
-    text = ""
-    for page in reader.pages:
-        try:
-            text += page.extract_text() + "\n"
-        except:
-            pass
-
-    text = re.sub(r'(?is)contents.*?(?=\n\s*Q|Question)', '', text)
-    mcq_blocks = re.split(r'(?:\n\s*(?:Q\s*\d+|Question\s*\d+|[\d]+\)))', text)
-
-    os.makedirs("images", exist_ok=True)
+def extract_mcqs_from_pdf(file_path):
     mcqs = []
+    try:
+        doc = fitz.open(file_path)
+        text = ""
+        for page in doc:
+            text += page.get_text("text")
 
-    for block in mcq_blocks:
-        block = block.strip()
-        if len(block.split()) < 3:
-            continue
+        # Basic split logic for MCQs (can adjust as needed)
+        questions = text.split("\n")
+        current_q = {}
+        for line in questions:
+            line = line.strip()
+            if not line:
+                continue
+            if line.lower().startswith(("q", "question")) or line[0].isdigit():
+                if current_q:
+                    mcqs.append(current_q)
+                current_q = {"question": line, "options": [], "answer": ""}
+            elif any(opt in line[:3] for opt in ["A.", "B.", "C.", "D."]):
+                current_q["options"].append(line)
+            elif "answer" in line.lower() or line.startswith("Ans:"):
+                current_q["answer"] = line.split(":")[-1].strip()
 
-        question = block.split("\n")[0].strip()
-        options = [l.strip() for l in block.split("\n") if re.match(r'^[A-Da-d][\).\-–\s]', l)]
-        if not options:
-            continue
+        if current_q:
+            mcqs.append(current_q)
 
-        ans_match = re.search(r'Correct\s*Answer[:\-–]?\s*([A-Da-d])', block, re.IGNORECASE)
-        correct_letter = ans_match.group(1).upper() if ans_match else None
-        exp_match = re.search(r'Explanation[:\-–]?\s*(.*)', block, re.IGNORECASE | re.DOTALL)
-        explanation = exp_match.group(1).strip() if exp_match else "Explanation not available."
-
-        mcqs.append({
-            "topic": "General",
-            "question": question,
-            "options": options,
-            "answer": correct_letter,
-            "explanation": explanation,
-            "image": None
-        })
+    except Exception as e:
+        print(f"❌ Error while reading PDF: {e}")
+        return []
 
     return mcqs
