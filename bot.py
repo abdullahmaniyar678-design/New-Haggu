@@ -1,70 +1,105 @@
-import os, time, json, telebot
+import os
+import logging
+from telegram import Update, InputFile
+from telegram.ext import ApplicationBuilder, MessageHandler, filters, ContextTypes
 from extract import extract_mcqs_from_pdf
-from mcq_formatter import format_mcq_message
+from mcq_formatter import format_mcq
+from server import keep_alive  # ✅ Added keep-alive
+import math
 
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
+# Enable logging
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
+)
+logger = logging.getLogger(__name__)
 
-bot = telebot.TeleBot(BOT_TOKEN)
+# Get environment variables
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
+ADMIN_ID = int(os.environ.get("ADMIN_ID", "0"))
 
-@bot.message_handler(content_types=['document'])
-def handle_docs(message):
-    if message.from_user.id != ADMIN_ID:
-        bot.reply_to(message, "❌ Only the admin can upload PDFs.")
-        return
+# Telegram message limit
+MAX_MESSAGE_LENGTH = 4000
 
-    file_info = bot.get_file(message.document.file_id)
-    downloaded_file = bot.download_file(file_info.file_path)
-    filename = message.document.file_name
-    os.makedirs("temp", exist_ok=True)
-    os.makedirs("output", exist_ok=True)
-    save_path = os.path.join("temp", filename)
-    with open(save_path, "wb") as f:
-        f.write(downloaded_file)
+# Start keep-alive Flask server
+keep_alive()
 
-    bot.reply_to(message, f"📄 *{filename}* received, extracting MCQs…", parse_mode="Markdown")
-    mcqs = extract_mcqs_from_pdf(save_path)
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("👋 Hello! Send me a PDF to extract MCQs automatically.")
 
-    if not mcqs:
-        bot.send_message(message.chat.id, "⚠️ No MCQs found in this file.")
-        return
+async def handle_docs(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        document = update.message.document
+        if not document:
+            return await update.message.reply_text("❌ Please send a valid PDF file.")
 
-    json_path = os.path.join("output", filename.replace('.pdf', '.json'))
-    with open(json_path, "w") as f:
-        json.dump(mcqs, f, indent=2)
+        # Save PDF temporarily
+        file_path = f"temp/{document.file_name}"
+        await document.get_file().download_to_drive(file_path)
+        await update.message.reply_text(f"📄 PDF '{document.file_name}' received! Extracting MCQs...")
 
-    bot.send_message(message.chat.id, f"✅ Extracted {len(mcqs)} MCQs. Sending them now…", parse_mode="Markdown")
+        # Extract MCQs
+        mcqs = extract_mcqs_from_pdf(file_path)
+        if not mcqs:
+            await update.message.reply_text("⚠️ No MCQs found in this PDF.")
+            return
 
-    current_topic = ""
-    MAX_LENGTH = 4000
+        await update.message.reply_text(f"✅ Extracted {len(mcqs)} MCQs. Sending them now...")
 
-    def safe_send(text):
-        if len(text) > MAX_LENGTH:
-            parts = [text[i:i+MAX_LENGTH] for i in range(0, len(text), MAX_LENGTH)]
-            for part in parts:
-                bot.send_message(message.chat.id, part, parse_mode="MarkdownV2")
-                time.sleep(1)
-        else:
-            bot.send_message(message.chat.id, text, parse_mode="MarkdownV2")
+        # Send MCQs topic-wise and in message-safe chunks
+        topic = "General"
+        header_sent = False
+        message_buffer = ""
 
-    for mcq in mcqs:
-        topic = mcq.get("topic", "General")
-        if topic != current_topic:
-            bot.send_message(message.chat.id, f"📘 *Topic:* {topic}", parse_mode="Markdown")
-            current_topic = topic
+        for i, mcq in enumerate(mcqs, 1):
+            # Send topic header only once
+            if not header_sent:
+                await update.message.reply_text(f"📘 *Topic: {topic}*", parse_mode="Markdown")
+                header_sent = True
 
-        msg = format_mcq_message(mcq)
+            formatted_mcq = format_mcq(mcq, i)
+            if len(message_buffer) + len(formatted_mcq) > MAX_MESSAGE_LENGTH:
+                await update.message.reply_text(message_buffer, parse_mode="Markdown")
+                message_buffer = formatted_mcq
+            else:
+                message_buffer += formatted_mcq + "\n\n"
 
-        if mcq.get("image"):
-            try:
-                with open(mcq["image"], "rb") as img:
-                    bot.send_photo(message.chat.id, img, caption=msg[:MAX_LENGTH], parse_mode="Markdown")
-            except:
-                safe_send(msg)
-        else:
-            safe_send(msg)
-        time.sleep(2)
+        # Send remaining MCQs
+        if message_buffer:
+            await update.message.reply_text(message_buffer, parse_mode="Markdown")
 
-    bot.send_message(message.chat.id, "✅ All MCQs sent successfully!", parse_mode="Markdown")
+        await update.message.reply_text("✅ All MCQs sent successfully!")
 
-bot.polling(none_stop=True)
+        # Cleanup
+        os.remove(file_path)
+
+    except Exception as e:
+        logger.error(f"Error handling document: {e}")
+        await update.message.reply_text("❌ Error processing your PDF. Please try again later.")
+
+async def send_startup_message(app):
+    """Send message to admin when bot starts"""
+    if ADMIN_ID:
+        try:
+            await app.bot.send_message(
+                chat_id=ADMIN_ID,
+                text="✅ Bot started successfully and is now running 24/7!"
+            )
+        except Exception as e:
+            logger.error(f"Could not send startup message: {e}")
+
+def main():
+    # Initialize app
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
+
+    # Handlers
+    app.add_handler(MessageHandler(filters.COMMAND & filters.Regex("^/start$"), start))
+    app.add_handler(MessageHandler(filters.Document.PDF, handle_docs))
+
+    # Notify admin when bot starts
+    app.post_init = lambda _: send_startup_message(app)
+
+    # Run bot
+    app.run_polling()
+
+if __name__ == "__main__":
+    main()
