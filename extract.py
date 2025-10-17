@@ -1,4 +1,5 @@
 import fitz  # PyMuPDF
+import re
 
 def extract_mcqs_from_pdf(file_path):
     mcqs = []
@@ -8,24 +9,26 @@ def extract_mcqs_from_pdf(file_path):
         for page in doc:
             text += page.get_text("text")
 
-        # Basic split logic for MCQs (can adjust as needed)
-        questions = text.split("\n")
+        # Clean and split lines
+        lines = [l.strip() for l in text.split("\n") if l.strip()]
+
         current_q = {}
-        for line in questions:
-            line = line.strip()
-            if not line:
-                continue
-            if line.lower().startswith(("q", "question")) or line[0].isdigit():
+        for line in lines:
+            # Match Question patterns like Q1, Question 1, or numbers with ?
+            if re.match(r"^(Q\d+|Question\s*\d+|\d+\.)", line, re.IGNORECASE):
                 if current_q:
                     mcqs.append(current_q)
                 current_q = {"question": line, "options": [], "answer": ""}
-            elif any(opt in line[:3] for opt in ["A.", "B.", "C.", "D."]):
+            elif re.match(r"^[A-D][\).]", line):  # Matches A), B), C), D)
                 current_q["options"].append(line)
             elif "answer" in line.lower() or line.startswith("Ans:"):
                 current_q["answer"] = line.split(":")[-1].strip()
 
         if current_q:
             mcqs.append(current_q)
+
+        # Filter out junk like single numbers
+        mcqs = [q for q in mcqs if len(q["question"]) > 5]
 
     except Exception as e:
         print(f"❌ Error while reading PDF: {e}")
